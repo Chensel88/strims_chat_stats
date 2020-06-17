@@ -1,6 +1,7 @@
 import asyncio
 import json
 from enum import Enum
+from typing import Dict
 from typing import List
 from typing import TypedDict
 
@@ -79,7 +80,7 @@ class Message(TypedDict):
     entities: Entities
 
 
-async def get_emotes() -> List[Emote]:
+async def get_emotes() -> Dict[str, List[Emote]]:
     async with aiohttp.ClientSession() as session:
         async with session.get(
             "https://chat.strims.gg/emote-manifest.json",
@@ -87,7 +88,11 @@ async def get_emotes() -> List[Emote]:
             return await response.json()
 
 
-async def handler() -> None:
+async def handler(emotes: List[Emote]) -> None:
+    emote_count: Dict[str, int] = {}
+    for emote in emotes:
+        emote_count.update({emote["name"]: 0})
+
     async with websockets.connect(HOST, ping_interval=None) as ws:
         while True:
             msg = await ws.recv()
@@ -110,7 +115,11 @@ async def handler() -> None:
                     )
             elif msg_type == "MSG":
                 chat_msg: Message = json.loads(json_msg)
-                print(f"{chat_msg['nick']}: {chat_msg['data']}")
+                chat_msg_data = chat_msg["data"]
+                for entity in chat_msg.get("entities", {}).get("emotes", []):
+                    emote_count[entity["name"]] += 1
+
+                print(f"{chat_msg['nick']}: {chat_msg_data}")
             else:
                 print(msg_type, json_msg)
 
@@ -119,7 +128,7 @@ def main() -> int:
     loop = asyncio.get_event_loop()
     emotes = loop.run_until_complete(get_emotes())
     print(emotes)
-    loop.run_until_complete(handler())
+    loop.run_until_complete(handler(emotes["emotes"]))
     loop.run_forever()
     loop.close()
     return 0
