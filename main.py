@@ -95,42 +95,49 @@ async def handler(emotes: List[Emote]) -> None:
 
     async with websockets.connect(HOST, ping_interval=None) as ws:
         while True:
-            msg = await ws.recv()
-            msg_type, json_msg = msg.split(None, 1)
-
-            if msg_type == "NAMES":
-                names_msg: ChatUsers = json.loads(json_msg)
-                print(f"We have {names_msg['connectioncount']} connections currently")
-            elif msg_type == "QUIT":
-                quit_msg: User = json.loads(json_msg)
-                print(f"{quit_msg['nick']} has quit")
-            elif msg_type == "JOIN":
-                join_msg: User = json.loads(json_msg)
-                print(f"{join_msg['nick']} has joined")
-            elif msg_type == "VIEWERSTATE":
-                vs_msg: ViewerState = json.loads(json_msg)
-                if vs_msg["online"] and "channel" in vs_msg:
-                    print(
-                        f"{vs_msg['nick']} is watching {vs_msg['channel']['channel']}",
-                    )
-            elif msg_type == "MSG":
-                chat_msg: Message = json.loads(json_msg)
-                chat_msg_data = chat_msg["data"]
-                for entity in chat_msg.get("entities", {}).get("emotes", []):
-                    emote_count[entity["name"]] += 1
-
-                print(f"{chat_msg['nick']}: {chat_msg_data}")
+            try:
+                msg = await ws.recv()
+            except websockets.exceptions.ConnectionClosedOK:  # CloudFlare WebSocket proxy restarting
+                handler(emotes)
             else:
-                print(msg_type, json_msg)
+                msg_type, json_msg = msg.split(None, 1)
+
+                if msg_type == "NAMES":
+                    names_msg: ChatUsers = json.loads(json_msg)
+                    print(
+                        f"We have {names_msg['connectioncount']} connections currently",
+                    )
+                elif msg_type == "QUIT":
+                    quit_msg: User = json.loads(json_msg)
+                    print(f"{quit_msg['nick']} has quit")
+                elif msg_type == "JOIN":
+                    join_msg: User = json.loads(json_msg)
+                    print(f"{join_msg['nick']} has joined")
+                elif msg_type == "VIEWERSTATE":
+                    vs_msg: ViewerState = json.loads(json_msg)
+                    if vs_msg["online"] and "channel" in vs_msg:
+                        print(
+                            f"{vs_msg['nick']} is watching {vs_msg['channel']['channel']}",
+                        )
+                elif msg_type == "MSG":
+                    chat_msg: Message = json.loads(json_msg)
+                    chat_msg_data = chat_msg["data"]
+                    for entity in chat_msg.get("entities", {}).get("emotes", []):
+                        emote_count[entity["name"]] += 1
+
+                    print(f"{chat_msg['nick']}: {chat_msg_data}")
+                else:
+                    print(msg_type, json_msg)
 
 
 def main() -> int:
     loop = asyncio.get_event_loop()
-    emotes = loop.run_until_complete(get_emotes())
-    print(emotes)
-    loop.run_until_complete(handler(emotes["emotes"]))
-    loop.run_forever()
-    loop.close()
+    try:
+        emotes = loop.run_until_complete(get_emotes())
+        loop.run_until_complete(handler(emotes["emotes"]))
+        loop.run_forever()
+    finally:
+        loop.close()
     return 0
 
 
