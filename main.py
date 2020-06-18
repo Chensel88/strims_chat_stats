@@ -90,8 +90,7 @@ async def get_emotes() -> Dict[str, List[Emote]]:
 
 async def handler(emotes: List[Emote]) -> None:
     emote_count: Dict[str, int] = {}
-    for emote in emotes:
-        emote_count.update({emote["name"]: 0})
+    [emote_count.update({emote["name"]: 0}) for emote in emotes]
 
     async with websockets.connect(HOST, ping_interval=None) as ws:
         while True:
@@ -134,7 +133,7 @@ def main() -> int:
     loop = asyncio.get_event_loop()
     try:
         emotes = loop.run_until_complete(get_emotes())
-        loop.run_until_complete(handler(emotes["emotes"]))
+        loop.create_task(handler(emotes["emotes"]))
         loop.run_forever()
     finally:
         loop.close()
