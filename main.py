@@ -1,37 +1,24 @@
 import asyncio
 import json
-from enum import Enum
-from typing import Dict
 from typing import List
 from typing import TypedDict
 
-import aiohttp
+import aiosqlite
+import httpx
 import websockets
 
 HOST = "wss://chat.strims.gg/ws"
-
-
-class Dimensions(TypedDict):
-    height: int
-    width: int
-
-
-class Size(Enum):
-    THE_1_X = "1x"
-    THE_2_X = "2x"
-    THE_4_X = "4x"
-
-
-class Version(TypedDict):
-    path: str
-    animated: bool
-    dimensions: Dimensions
-    size: Size
+EMOTE_MANIFEST = "https://chat.strims.gg/emote-manifest.json"
+DB_NAME = "strims.db"
+MSG = "MSG"
+JOIN = "JOIN"
+QUIT = "QUIT"
+VIEWERSTATE = "VIEWERSTATE"
+NAMES = "NAMES"
 
 
 class Emote(TypedDict):
     name: str
-    versions: List[Version]
 
 
 class User(TypedDict):
@@ -80,61 +67,103 @@ class Message(TypedDict):
     entities: Entities
 
 
-async def get_emotes() -> Dict[str, List[Emote]]:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(
-            "https://chat.strims.gg/emote-manifest.json",
-        ) as response:
-            return await response.json()
+async def setup_db(path: str) -> None:
+    db = await aiosqlite.connect(path)
+    create_users_statement = """
+CREATE TABLE IF NOT EXISTS users (
+    nick TEXT PRIMARY KEY
+);
+
+"""
+    create_msgs_statement = """
+CREATE TABLE IF NOT EXISTS messages (
+    data TEXT NOT NULL,
+    timestamp INTEGER,
+    nick TEXT NOT NULL,
+    PRIMARY KEY (nick, timestamp)
+    FOREIGN KEY (nick)
+        REFERENCES users (nick)
+);
+"""
+    await db.execute(create_users_statement)
+    await db.execute(create_msgs_statement)
+    await db.commit()
+    await db.close()
+    return
 
 
-async def handler(emotes: List[Emote]) -> None:
-    emote_count: Dict[str, int] = {}
-    [emote_count.update({emote["name"]: 0}) for emote in emotes]
+async def get_emotes() -> List[Emote]:
+    async with httpx.AsyncClient() as client:
+        return (await client.get(EMOTE_MANIFEST)).json()["emotes"]
 
-    async with websockets.connect(HOST, ping_interval=None) as ws:
+
+async def handler(emotes: List[Emote], db_path: str) -> None:
+    # link count by type
+    # link count by site
+    # user msg count
+    # emote count overall and by user
+
+    async with websockets.connect(HOST, ping_interval=None) as ws, aiosqlite.connect(
+        db_path,
+    ) as db:
         while True:
             try:
                 msg = await ws.recv()
-            except websockets.exceptions.ConnectionClosedOK:  # CloudFlare WebSocket proxy restarting
-                handler(emotes)
+            except websockets.exceptions.ConnectionClosedOK as ex:  # CloudFlare WebSocket proxy restarting
+                raise ex
             else:
                 msg_type, json_msg = msg.split(None, 1)
 
-                if msg_type == "NAMES":
+                if msg_type == NAMES:
                     names_msg: ChatUsers = json.loads(json_msg)
                     print(
                         f"We have {names_msg['connectioncount']} connections currently",
                     )
-                elif msg_type == "QUIT":
+                    await db.executemany(
+                        "INSERT OR IGNORE INTO users VALUES(?)",
+                        [(user["nick"],) for user in names_msg["users"]],
+                    )
+                    await db.commit()
+                elif msg_type == QUIT:
                     quit_msg: User = json.loads(json_msg)
                     print(f"{quit_msg['nick']} has quit")
-                elif msg_type == "JOIN":
+                elif msg_type == JOIN:
                     join_msg: User = json.loads(json_msg)
                     print(f"{join_msg['nick']} has joined")
-                elif msg_type == "VIEWERSTATE":
+                    await db.execute(
+                        "INSERT OR IGNORE INTO users(nick) VALUES(?)",
+                        (join_msg["nick"],),
+                    )
+                    await db.commit()
+                elif msg_type == VIEWERSTATE:
                     vs_msg: ViewerState = json.loads(json_msg)
                     if vs_msg["online"] and "channel" in vs_msg:
                         print(
                             f"{vs_msg['nick']} is watching {vs_msg['channel']['channel']}",
                         )
-                elif msg_type == "MSG":
+                elif msg_type == MSG:
                     chat_msg: Message = json.loads(json_msg)
                     chat_msg_data = chat_msg["data"]
-                    for entity in chat_msg.get("entities", {}).get("emotes", []):
-                        emote_count[entity["name"]] += 1
-
                     print(f"{chat_msg['nick']}: {chat_msg_data}")
+                    await db.execute(
+                        "INSERT INTO messages(data, timestamp, nick) VALUES(?,?,?)",
+                        (chat_msg_data, chat_msg["timestamp"], chat_msg["nick"]),
+                    )
+                    await db.commit()
                 else:
                     print(msg_type, json_msg)
 
 
 def main() -> int:
     loop = asyncio.get_event_loop()
+    loop.set_debug(True)
     try:
+        loop.run_until_complete(setup_db(DB_NAME))
         emotes = loop.run_until_complete(get_emotes())
-        loop.create_task(handler(emotes["emotes"]))
+        loop.create_task(handler(emotes, DB_NAME))
         loop.run_forever()
+    except Exception as ex:
+        raise ex
     finally:
         loop.close()
     return 0
