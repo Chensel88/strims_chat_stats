@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import AsyncGenerator
 from typing import List
 from typing import TypedDict
 
@@ -67,29 +68,25 @@ class Message(TypedDict):
     entities: Entities
 
 
-async def setup_db(path: str) -> None:
+async def setup_db(path: str) -> aiosqlite.Connection:
     db = await aiosqlite.connect(path)
     create_users_statement = """
 CREATE TABLE IF NOT EXISTS users (
     nick TEXT PRIMARY KEY
-);
-
-"""
+);"""
     create_msgs_statement = """
 CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     data TEXT NOT NULL,
-    timestamp INTEGER,
+    timestamp INTEGER NOT NULL,
     nick TEXT NOT NULL,
-    PRIMARY KEY (nick, timestamp)
     FOREIGN KEY (nick)
         REFERENCES users (nick)
-);
-"""
+);"""
     await db.execute(create_users_statement)
     await db.execute(create_msgs_statement)
     await db.commit()
-    await db.close()
-    return
+    return db
 
 
 async def get_emotes() -> List[Emote]:
@@ -97,74 +94,72 @@ async def get_emotes() -> List[Emote]:
         return (await client.get(EMOTE_MANIFEST)).json()["emotes"]
 
 
-async def handler(emotes: List[Emote], db_path: str) -> None:
-    # link count by type
-    # link count by site
-    # user msg count
-    # emote count overall and by user
+# link count by type
+# link count by site
+# user msg count
+# emote count overall and by user
+async def handle_msg(msg: str, db: aiosqlite.Connection):
+    msg_type, json_msg = msg.split(None, 1)
+    if msg_type == NAMES:
+        names_msg: ChatUsers = json.loads(json_msg)
+        print(f"We have {names_msg['connectioncount']} connections currently")
+        await db.executemany(
+            "INSERT OR IGNORE INTO users VALUES(?)",
+            [(user["nick"],) for user in names_msg["users"]],
+        )
+        await db.commit()
+    elif msg_type == QUIT:
+        quit_msg: User = json.loads(json_msg)
+        print(f"{quit_msg['nick']} has quit")
+    elif msg_type == JOIN:
+        join_msg: User = json.loads(json_msg)
+        print(f"{join_msg['nick']} has joined")
+        await db.execute(
+            "INSERT OR IGNORE INTO users VALUES(?)", (join_msg["nick"],),
+        )
+        await db.commit()
+    elif msg_type == VIEWERSTATE:
+        ...
+    elif msg_type == MSG:
+        chat_msg: Message = json.loads(json_msg)
+        chat_msg_data = chat_msg["data"]
+        print(f"{chat_msg['nick']}: {chat_msg_data}")
+        await db.execute(
+            "INSERT INTO messages(data, timestamp, nick) VALUES(?,?,?)",
+            (chat_msg_data, chat_msg["timestamp"], chat_msg["nick"]),
+        )
+        await db.commit()
+    else:
+        print(msg_type, json_msg)
 
-    async with websockets.connect(HOST, ping_interval=None) as ws, aiosqlite.connect(
-        db_path,
-    ) as db:
+
+async def ws_handler(emotes: List[Emote]) -> AsyncGenerator:
+    async with websockets.connect(HOST, ping_interval=None) as ws:
         while True:
             try:
                 msg = await ws.recv()
             except websockets.exceptions.ConnectionClosedOK as ex:  # CloudFlare WebSocket proxy restarting
                 raise ex
             else:
-                msg_type, json_msg = msg.split(None, 1)
+                yield msg
 
-                if msg_type == NAMES:
-                    names_msg: ChatUsers = json.loads(json_msg)
-                    print(
-                        f"We have {names_msg['connectioncount']} connections currently",
-                    )
-                    await db.executemany(
-                        "INSERT OR IGNORE INTO users VALUES(?)",
-                        [(user["nick"],) for user in names_msg["users"]],
-                    )
-                    await db.commit()
-                elif msg_type == QUIT:
-                    quit_msg: User = json.loads(json_msg)
-                    print(f"{quit_msg['nick']} has quit")
-                elif msg_type == JOIN:
-                    join_msg: User = json.loads(json_msg)
-                    print(f"{join_msg['nick']} has joined")
-                    await db.execute(
-                        "INSERT OR IGNORE INTO users(nick) VALUES(?)",
-                        (join_msg["nick"],),
-                    )
-                    await db.commit()
-                elif msg_type == VIEWERSTATE:
-                    vs_msg: ViewerState = json.loads(json_msg)
-                    if vs_msg["online"] and "channel" in vs_msg:
-                        print(
-                            f"{vs_msg['nick']} is watching {vs_msg['channel']['channel']}",
-                        )
-                elif msg_type == MSG:
-                    chat_msg: Message = json.loads(json_msg)
-                    chat_msg_data = chat_msg["data"]
-                    print(f"{chat_msg['nick']}: {chat_msg_data}")
-                    await db.execute(
-                        "INSERT INTO messages(data, timestamp, nick) VALUES(?,?,?)",
-                        (chat_msg_data, chat_msg["timestamp"], chat_msg["nick"]),
-                    )
-                    await db.commit()
-                else:
-                    print(msg_type, json_msg)
+
+async def run(db: aiosqlite.Connection, emotes: List[Emote]):
+    async for msg in ws_handler(emotes):
+        await handle_msg(msg, db)
 
 
 def main() -> int:
     loop = asyncio.get_event_loop()
     loop.set_debug(True)
     try:
-        loop.run_until_complete(setup_db(DB_NAME))
+        db = loop.run_until_complete(setup_db(DB_NAME))
         emotes = loop.run_until_complete(get_emotes())
-        loop.create_task(handler(emotes, DB_NAME))
-        loop.run_forever()
+        loop.run_until_complete(run(db, emotes))
     except Exception as ex:
         raise ex
     finally:
+        loop.run_until_complete(db.close())
         loop.close()
     return 0
 
