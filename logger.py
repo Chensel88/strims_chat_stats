@@ -8,18 +8,14 @@ import aiosqlite
 import httpx
 import websockets
 
-HOST = "wss://chat.strims.gg/ws"
 EMOTE_MANIFEST = "https://chat.strims.gg/emote-manifest.json"
-DB_NAME = "strims.db"
+HOST = "wss://chat.strims.gg/ws"
+DB_NAME = "strims1.db"
 MSG = "MSG"
 JOIN = "JOIN"
 QUIT = "QUIT"
-VIEWERSTATE = "VIEWERSTATE"
 NAMES = "NAMES"
-
-
-class Emote(TypedDict):
-    name: str
+VIEWERSTATE = "VIEWERSTATE"
 
 
 class User(TypedDict):
@@ -68,25 +64,8 @@ class Message(TypedDict):
     entities: Entities
 
 
-async def setup_db(path: str) -> aiosqlite.Connection:
-    db = await aiosqlite.connect(path)
-    create_users_statement = """
-CREATE TABLE IF NOT EXISTS users (
-    nick TEXT PRIMARY KEY
-);"""
-    create_msgs_statement = """
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    data TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
-    nick TEXT NOT NULL,
-    FOREIGN KEY (nick)
-        REFERENCES users (nick)
-);"""
-    await db.execute(create_users_statement)
-    await db.execute(create_msgs_statement)
-    await db.commit()
-    return db
+class Emote(TypedDict):
+    name: str
 
 
 async def get_emotes() -> List[Emote]:
@@ -94,10 +73,39 @@ async def get_emotes() -> List[Emote]:
         return (await client.get(EMOTE_MANIFEST)).json()["emotes"]
 
 
-# link count by type
-# link count by site
-# user msg count
-# emote count overall and by user
+async def setup_db(path: str) -> aiosqlite.Connection:
+    db = await aiosqlite.connect(path)
+    create_users_table = """
+CREATE TABLE IF NOT EXISTS users (
+    nick TEXT PRIMARY KEY
+);"""
+    create_msgs_table = """
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    data TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    nick TEXT NOT NULL REFERENCES users (nick)
+);"""
+    create_entites_table = """
+CREATE TABLE IF NOT EXISTS entities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    data TEXT NOT NULL
+);"""
+    create_entity_in_msg_table = """
+CREATE TABLE IF NOT EXISTS entity_in_msg (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    msgid INTEGER NOT NULL REFERENCES messages (id),
+    entityid INTEGER NOT NULL REFERENCES entities (id)
+);"""
+    await db.execute(create_users_table)
+    await db.execute(create_msgs_table)
+    await db.execute(create_entites_table)
+    await db.execute(create_entity_in_msg_table)
+    await db.commit()
+    return db
+
+
 async def handle_msg(msg: str, db: aiosqlite.Connection):
     msg_type, json_msg = msg.split(None, 1)
     if msg_type == NAMES:
@@ -108,9 +116,6 @@ async def handle_msg(msg: str, db: aiosqlite.Connection):
             [(user["nick"],) for user in names_msg["users"]],
         )
         await db.commit()
-    elif msg_type == QUIT:
-        quit_msg: User = json.loads(json_msg)
-        print(f"{quit_msg['nick']} has quit")
     elif msg_type == JOIN:
         join_msg: User = json.loads(json_msg)
         print(f"{join_msg['nick']} has joined")
@@ -118,22 +123,34 @@ async def handle_msg(msg: str, db: aiosqlite.Connection):
             "INSERT OR IGNORE INTO users VALUES(?)", (join_msg["nick"],),
         )
         await db.commit()
+    elif msg_type == QUIT:
+        ...
     elif msg_type == VIEWERSTATE:
         ...
     elif msg_type == MSG:
         chat_msg: Message = json.loads(json_msg)
         chat_msg_data = chat_msg["data"]
         print(f"{chat_msg['nick']}: {chat_msg_data}")
-        await db.execute(
+        mrow = await db.execute_insert(
             "INSERT INTO messages(data, timestamp, nick) VALUES(?,?,?)",
             (chat_msg_data, chat_msg["timestamp"], chat_msg["nick"]),
         )
+        for emote in chat_msg.get("entities", {}).get("emotes", []):
+            erow = await db.execute_insert(
+                "INSERT INTO entities(type, data) VALUES(?, ?)",
+                ("emote", emote["name"]),
+            )
+            await db.execute(
+                "INSERT INTO entity_in_msg(msgid, entityid) VALUES(?,?)",
+                (mrow[0], erow[0]),
+            )
+
         await db.commit()
     else:
         print(msg_type, json_msg)
 
 
-async def ws_handler(emotes: List[Emote]) -> AsyncGenerator:
+async def ws_handler() -> AsyncGenerator:
     async with websockets.connect(HOST, ping_interval=None) as ws:
         while True:
             try:
@@ -144,8 +161,8 @@ async def ws_handler(emotes: List[Emote]) -> AsyncGenerator:
                 yield msg
 
 
-async def run(db: aiosqlite.Connection, emotes: List[Emote]):
-    async for msg in ws_handler(emotes):
+async def run(db: aiosqlite.Connection):
+    async for msg in ws_handler():
         await handle_msg(msg, db)
 
 
@@ -154,8 +171,7 @@ def main() -> int:
     loop.set_debug(True)
     try:
         db = loop.run_until_complete(setup_db(DB_NAME))
-        emotes = loop.run_until_complete(get_emotes())
-        loop.run_until_complete(run(db, emotes))
+        loop.run_until_complete(run(db))
     except Exception as ex:
         raise ex
     finally:
