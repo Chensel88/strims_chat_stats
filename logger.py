@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from typing import AsyncGenerator
 from typing import List
 from typing import TypedDict
@@ -10,7 +11,7 @@ import websockets
 
 EMOTE_MANIFEST = "https://chat.strims.gg/emote-manifest.json"
 HOST = "wss://chat.strims.gg/ws"
-DB_NAME = "strims1.db"
+DB_NAME = sys.argv[1] if len(sys.argv) > 1 else "bin/strims.db"
 MSG = "MSG"
 JOIN = "JOIN"
 QUIT = "QUIT"
