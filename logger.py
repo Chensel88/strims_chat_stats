@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+from enum import Enum
 from typing import AsyncGenerator
 from typing import List
 from typing import TypedDict
@@ -12,11 +13,14 @@ import websockets
 EMOTE_MANIFEST = "https://chat.strims.gg/emote-manifest.json"
 HOST = "wss://chat.strims.gg/ws"
 DB_NAME = sys.argv[1] if len(sys.argv) > 1 else "bin/strims.db"
-MSG = "MSG"
-JOIN = "JOIN"
-QUIT = "QUIT"
-NAMES = "NAMES"
-VIEWERSTATE = "VIEWERSTATE"
+
+
+class MsgType(Enum):
+    MSG = "MSG"
+    JOIN = "JOIN"
+    QUIT = "QUIT"
+    NAMES = "NAMES"
+    VIEWERSTATE = "VIEWERSTATE"
 
 
 class User(TypedDict):
@@ -109,7 +113,7 @@ CREATE TABLE IF NOT EXISTS entity_in_msg (
 
 async def handle_msg(msg: str, db: aiosqlite.Connection):
     msg_type, json_msg = msg.split(None, 1)
-    if msg_type == NAMES:
+    if msg_type == MsgType.NAMES:
         names_msg: ChatUsers = json.loads(json_msg)
         print(f"We have {names_msg['connectioncount']} connections currently")
         await db.executemany(
@@ -117,18 +121,18 @@ async def handle_msg(msg: str, db: aiosqlite.Connection):
             [(user["nick"],) for user in names_msg["users"]],
         )
         await db.commit()
-    elif msg_type == JOIN:
+    elif msg_type == MsgType.JOIN:
         join_msg: User = json.loads(json_msg)
         print(f"{join_msg['nick']} has joined")
         await db.execute(
             "INSERT OR IGNORE INTO users VALUES(?)", (join_msg["nick"],),
         )
         await db.commit()
-    elif msg_type == QUIT:
+    elif msg_type == MsgType.QUIT:
         ...
-    elif msg_type == VIEWERSTATE:
+    elif msg_type == MsgType.VIEWERSTATE:
         ...
-    elif msg_type == MSG:
+    elif msg_type == MsgType.MSG:
         chat_msg: Message = json.loads(json_msg)
         chat_msg_data = chat_msg["data"]
         print(f"{chat_msg['nick']}: {chat_msg_data}")
